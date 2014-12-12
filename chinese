@@ -1,0 +1,2077 @@
+
+
+
+## aggregate
+
+
+aggregate方法是一个高度定制化的RDD聚合和reduction方法，但是由于Scala和Spark在数据处理上的方式的原因，我们应该在真正使用的时候多加注意。下面是我们在使用中所观察到的要点：
+
+* reduce和combine方法是可代替的并且相互关联的
+* 如方法定义中所述，combiner的输出必须是和输入类型一致，因为Spark是链式执行
+* zeroValue是U的初始值，作为**seqOp**和**combOp**执行之前的首个输入元素。你可以随着自己的需求改变它，但是为了代码执行结果的一致性，无论数据被分成多少份，每份有多大，都要保证产生同样的结果。
+* 不要假设每个数据分片的执行顺序。
+* 在每个数据分片上执行reduce之前，会设置一个zeroValue作为第一个输入，在执行combiner方法之前也会降zeroValue作为第一个输入。
+* 为什么会有两个数据合并的输入函数？第一个函数将输入值映射到结果空间，输入值T可以和结果空间的值U不是一个类型，第二个函数将第一个函数映射后的结果再合并起来。
+* 为什么有人需要输入两种数据类型的数据？此处举出一个示例，假设我们现在在考古遗址的现场，并且通过金属探测器找到重要的位置，并把位置的坐标记录下来。这样我们就可以通过聚合函数聚合这些标志出的坐标并画在地图上。我们可以设置**zeroValue**为一个空的地图。GPS坐标被存储在多个数据分片中，**seqOp**可以将GPS坐标转化为地图坐标，并标注在**zeroValue**表示的地图上。**combOp**将这些标注在地图上的数据以及每个数据分片所代表的地图合并成一张完整的地图。
+
+
+### 定义
+
+def aggregate\[U: ClassTag\](zeroValue: U)(seqOp: (U, T) => U, combOp: (U, U) => U): U
+
+
+### Examples 1
+
+<pre>
+val z = sc.parallelize(List(1,2,3,4,5,6), 2)
+z.aggregate(0)(math.max(_, _), _ + _)
+res40: Int = 9
+
+val z = sc.parallelize(List("a","b","c","d","e","f"),2)
+z.aggregate("")(_ + _, _+_)
+res115: String = abcdef
+
+z.aggregate("x")(_ + _, _+_)
+res116: String = xxdefxabc
+
+val z = sc.parallelize(List("12","23","345","4567"),2)
+z.aggregate("")((x,y) => math.max(x.length, y.length).toString, (x,y) => x + y)
+res141: String = 42
+
+z.aggregate("")((x,y) => math.min(x.length, y.length).toString, (x,y) => x + y)
+res142: String = 11
+
+val z = sc.parallelize(List("12","23","345",""),2)
+z.aggregate("")((x,y) => math.min(x.length, y.length).toString, (x,y) => x + y)
+res143: String = 10
+</pre>
+
+### Examples 2
+
+<pre>
+val z = sc.parallelize(List("12","23","","345"),2)
+z.aggregate("")((x,y) => math.min(x.length, y.length).toString, (x,y) => x + y)
+res144: String = 11
+</pre>
+
+相对于输入是数值，字符串输入会使人有一点点困惑，如果没想清楚aggregate功能的话。以示例2为例子，zeroValue为空字符串，假设第一个数据分片的输入是"12","23"，则第一次计算""与"12"的最小长度是0，第二次计算以第一次计算结果做为输入"0"和"23"则最小长度为1，则此数据分片的最终输出为"1"，同理第二个数据分片也能得到输出"1"，最后combiner合并后可得"11"。
+
+----
+
+
+## checkpoint
+
+checkpoint在RDD被执行的时候调用。被checkpoint的RDD被存储在一个二进制文件中，文件存储在Spark context的初始设置的“checkpoint文件夹”里面。checkpoint文件夹必须存在于所有slave机器中，或者也可以设置成HDFS的地址。
+
+
+### 定义
+
+def checkpoint()
+
+### Example
+
+<pre>
+sc.setCheckpointDir("my_directory_name")
+val a = sc.parallelize(1 to 4)
+a.checkpoint
+a.count
+14/02/25 18:13:53 INFO SparkContext: Starting job: count at <console>:15
+...
+14/02/25 18:13:53 INFO MemoryStore: Block broadcast_5 stored as values to memory (estimated size 115.7 KB, free 296.3 MB)
+14/02/25 18:13:53 INFO RDDCheckpointData: Done checkpointing RDD 11 to file:/home/cloudera/Documents/spark-0.9.0-incubating-bin-cdh4/bin/my_directory_name/65407913-fdc6-4ec1-82c9-48a1656b95d6/rdd-11, new parent is RDD 12
+res23: Long = 4 
+
+</pre>
+
+----
+
+## coalesce, repartition
+
+将RDD数据重新分片，repartition是coalesce(numPartitions, shuffle = true)的缩写。
+
+### 定义
+
+def coalesce ( numPartitions : Int , shuffle : Boolean = false ): RDD [T]
+def repartition ( numPartitions : Int ): RDD [T]
+
+
+### Example
+
+<pre>
+val y = sc.parallelize(1 to 10, 10)
+val z = y.coalesce(2, false)
+z.partitions.length
+res9: Int = 2
+</pre>
+
+----
+
+## cogroup [Pair], groupWith [Pair]
+
+将需要cogroup的所有RDD对象放在一起，并将所有RDD中的所有tuple按key进行分组，得到的结果tuple包含当前tuple和其他tuple按可以分组后的value集合。具体参看示例。
+
+### 定义
+
+def cogroup[W](other: RDD[(K, W)]): RDD[(K, (Iterable[V], Iterable[W]))]
+def cogroup[W](other: RDD[(K, W)], numPartitions: Int): RDD[(K, (Iterable[V], Iterable[W]))]
+def cogroup[W](other: RDD[(K, W)], partitioner: Partitioner): RDD[(K, (Iterable[V], Iterable[W]))]
+def cogroup[W1, W2](other1: RDD[(K, W1)], other2: RDD[(K, W2)]): RDD[(K, (Iterable[V], Iterable[W1], Iterable[W2]))]
+def cogroup[W1, W2](other1: RDD[(K, W1)], other2: RDD[(K, W2)], numPartitions: Int): RDD[(K, (Iterable[V], Iterable[W1], Iterable[W2]))]
+def cogroup[W1, W2](other1: RDD[(K, W1)], other2: RDD[(K, W2)], partitioner: Partitioner): RDD[(K, (Iterable[V], Iterable[W1], Iterable[W2]))]
+def groupWith[W](other: RDD[(K, W)]): RDD[(K, (Iterable[V], Iterable[W]))]
+def groupWith[W1, W2](other1: RDD[(K, W1)], other2: RDD[(K, W2)]): RDD[(K, (Iterable[V], IterableW1], Iterable[W2]))] 
+
+### Examples
+
+<pre>
+val a = sc.parallelize(List(1, 2, 1, 3), 1)
+val b = a.map((_, "b"))
+val c = a.map((_, "c"))
+b.cogroup(c).collect
+res7: Array[(Int, (Iterable[String], Iterable[String]))] = Array(
+(2,(ArrayBuffer(b),ArrayBuffer(c))),
+(3,(ArrayBuffer(b),ArrayBuffer(c))),
+(1,(ArrayBuffer(b, b),ArrayBuffer(c, c)))
+)
+
+val d = a.map((_, "d"))
+b.cogroup(c, d).collect
+res9: Array[(Int, (Iterable[String], Iterable[String], Iterable[String]))] = Array(
+(2,(ArrayBuffer(b),ArrayBuffer(c),ArrayBuffer(d))),
+(3,(ArrayBuffer(b),ArrayBuffer(c),ArrayBuffer(d))),
+(1,(ArrayBuffer(b, b),ArrayBuffer(c, c),ArrayBuffer(d, d)))
+)
+
+val x = sc.parallelize(List((1, "apple"), (2, "banana"), (3, "orange"), (4, "kiwi")), 2)
+val y = sc.parallelize(List((5, "computer"), (1, "laptop"), (1, "desktop"), (4, "iPad")), 2)
+x.cogroup(y).collect
+res23: Array[(Int, (Iterable[String], Iterable[String]))] = Array(
+(4,(ArrayBuffer(kiwi),ArrayBuffer(iPad))), 
+(2,(ArrayBuffer(banana),ArrayBuffer())), 
+(3,(ArrayBuffer(orange),ArrayBuffer())),
+(1,(ArrayBuffer(apple),ArrayBuffer(laptop, desktop))),
+(5,(ArrayBuffer(),ArrayBuffer(computer))))
+</pre>
+
+----
+
+
+## collect
+
+将RDD转换为Scala数组。在collect中可以添加一个过滤函数对返回的数据进行初步处理，将原始数据T转化为目标数据U。
+
+### 定义
+
+def collect(): Array[T]
+def collect[U: ClassTag](f: PartialFunction[T, U]): RDD[U]
+
+### Example
+
+<pre>
+val c = sc.parallelize(List("Gnu", "Cat", "Rat", "Dog", "Gnu", "Rat"), 2)
+c.collect
+res29: Array[String] = Array(Gnu, Cat, Rat, Dog, Gnu, Rat)
+</pre>
+
+----
+
+
+## collectAsMap [Pair] 
+
+类似collect方法，但是作用于key-value形态的RDDs，方法会返回Scala中map数据类型的kv结构数据。
+
+### 定义
+
+def collectAsMap(): Map[K, V] 
+
+### Example
+
+<pre>
+val a = sc.parallelize(List(1, 2, 1, 3), 1)
+val b = a.zip(a)
+b.collectAsMap
+res1: scala.collection.Map[Int,Int] = Map(2 -> 2, 1 -> 1, 3 -> 3) 
+
+</pre>
+
+----
+
+
+## combineByKey[Pair]
+
+在每个partition中先创建初始combiner（createCombiner），然后将当前RDD的数据单元逐个输入combiner进行处理（如拼装），每个partition处理后，再在mergeCombiner中将各个partition的结果进行综合处理。
+
+### 定义
+
+def combineByKey[C](createCombiner: V => C, mergeValue: (C, V) => C, mergeCombiners: (C, C) => C): RDD[(K, C)]
+def combineByKey[C](createCombiner: V => C, mergeValue: (C, V) => C, mergeCombiners: (C, C) => C, numPartitions: Int): RDD[(K, C)]
+def combineByKey[C](createCombiner: V => C, mergeValue: (C, V) => C, mergeCombiners: (C, C) => C, partitioner: Partitioner, mapSideCombine: Boolean = true, serializerClass: String = null): RDD[(K, C)] 
+
+### Example
+
+<pre>
+val a = sc.parallelize(List("dog","cat","gnu","salmon","rabbit","turkey","wolf","bear","bee"), 3)
+val b = sc.parallelize(List(1,1,2,2,2,1,2,2,2), 3)
+val c = b.zip(a)
+val d = c.combineByKey(List(_), (x:List[String], y:String) => y :: x, (x:List[String], y:List[String]) => x ::: y)
+d.collect
+res16: Array[(Int, List[String])] = Array((1,List(cat, dog, turkey)), (2,List(gnu, rabbit, salmon, bee, bear, wolf)))
+</pre>
+
+----
+
+## context, sparkContext
+
+返回SparkContext对象用来创建RDD。
+
+
+### 定义
+
+def compute(split: Partition, context: TaskContext): Iterator[T] 
+
+### Example
+
+<pre>
+val c = sc.parallelize(List("Gnu", "Cat", "Rat", "Dog"), 2)
+c.context
+res8: org.apache.spark.SparkContext = org.apache.spark.SparkContext@58c1c2f1
+</pre>
+
+----
+
+## count
+
+返回RDD中数据单元的个数。
+
+### 定义
+
+def count(): Long 
+
+### Example
+
+<pre>
+val c = sc.parallelize(List("Gnu", "Cat", "Rat", "Dog"), 2)
+c.count
+res2: Long = 4
+</pre>
+
+----
+
+## countByKey [Pair]
+
+针对二元组每个unique的key进行count。
+
+### 定义
+
+def countByKey(): Map[K, Long]
+
+### Example
+
+<pre>
+val c = sc.parallelize(List((3, "Gnu"), (3, "Yak"), (5, "Mouse"), (3, "Dog")), 2)
+c.countByKey
+res3: scala.collection.Map[Int,Long] = Map(3 -> 3, 5 -> 1)
+</pre>
+
+----
+
+## countByValue
+
+返回unique的value所对应的个数。相对应countByKey。
+
+### 定义
+
+def countByValue(): Map[T, Long]
+
+### Example
+
+<pre>
+val b = sc.parallelize(List(1,2,3,4,5,6,7,8,2,4,2,1,1,1,1,1))
+b.countByValue
+res27: scala.collection.Map[Int,Long] = Map(5 -> 1, 8 -> 1, 3 -> 1, 6 -> 1, 1 -> 6, 2 -> 3, 4 -> 2, 7 -> 1) 
+</pre>
+
+----
+
+## countApproxDistinct
+
+快速计算count，但不精确。relativeSD控制精度。
+
+### 定义
+
+def countApproxDistinct(relativeSD: Double = 0.05): Long
+
+### Example
+
+<pre>
+val a = sc.parallelize(1 to 10000, 20)
+val b = a++a++a++a++a
+b.countApproxDistinct(0.1)
+res14: Long = 8224
+
+b.countApproxDistinct(0.05)
+res15: Long = 9750
+
+b.countApproxDistinct(0.01)
+res16: Long = 9947
+
+b.countApproxDistinct(0.001)
+res0: Long = 10000
+
+</pre>
+
+----
+
+## countApproxDistinctByKey [Pair]
+
+类似countApproxDistinct，此方法计算不同key下不同value的数目。但也不精确，relativeSD控制精度。
+
+### 定义
+
+def countApproxDistinctByKey(relativeSD: Double = 0.05): RDD[(K, Long)]
+def countApproxDistinctByKey(relativeSD: Double, numPartitions: Int): RDD[(K, Long)]
+def countApproxDistinctByKey(relativeSD: Double, partitioner: Partitioner): RDD[(K, Long)]
+
+### Example
+
+<pre>
+val a = sc.parallelize(List("Gnu", "Cat", "Rat", "Dog"), 2)
+val b = sc.parallelize(a.takeSample(true, 10000, 0), 20)
+val c = sc.parallelize(1 to b.count().toInt, 20)
+val d = b.zip(c)
+d.countApproxDistinctByKey(0.1).collect
+res15: Array[(String, Long)] = Array((Rat,2567), (Cat,3357), (Dog,2414), (Gnu,2494))
+
+d.countApproxDistinctByKey(0.01).collect
+res16: Array[(String, Long)] = Array((Rat,2555), (Cat,2455), (Dog,2425), (Gnu,2513))
+
+d.countApproxDistinctByKey(0.001).collect
+res0: Array[(String, Long)] = Array((Rat,2562), (Cat,2464), (Dog,2451), (Gnu,2521))
+</pre>
+
+----
+
+## dependencies
+
+返回当前RDD所依赖的RDD。
+
+### 定义
+
+final def dependencies: Seq[Dependency[_]]
+
+### Example
+
+<pre>
+val b = sc.parallelize(List(1,2,3,4,5,6,7,8,2,4,2,1,1,1,1,1))
+b: org.apache.spark.rdd.RDD[Int] = ParallelCollectionRDD[32] at parallelize at <console>:12
+b.dependencies.length
+Int = 0
+
+b.map(a => a).dependencies.length
+res40: Int = 1
+
+b.cartesian(a).dependencies.length
+res41: Int = 2
+
+b.cartesian(a).dependencies
+res42: Seq[org.apache.spark.Dependency[_]] = List(org.apache.spark.rdd.CartesianRDD$$anon$1@576ddaaa, org.apache.spark.rdd.CartesianRDD$$anon$2@6d2efbbd) 
+
+</pre>
+
+----
+
+## distinct
+
+针对RDD中的数据进行去重。
+
+### 定义
+
+def distinct(): RDD[T]
+def distinct(numPartitions: Int): RDD[T]
+
+### Example
+
+<pre>
+val c = sc.parallelize(List("Gnu", "Cat", "Rat", "Dog", "Gnu", "Rat"), 2)
+c.distinct.collect
+res6: Array[String] = Array(Dog, Gnu, Cat, Rat)
+
+val a = sc.parallelize(List(1,2,3,4,5,6,7,8,9,10))
+a.distinct(2).partitions.length
+res16: Int = 2
+
+a.distinct(3).partitions.length
+res17: Int = 3
+</pre>
+
+----
+
+## first
+
+返回RDD数据中第一个数据元素。
+
+### 定义
+
+def first(): T
+
+### Example
+
+<pre>
+val c = sc.parallelize(List("Gnu", "Cat", "Rat", "Dog"), 2)
+c.first
+res1: String = Gnu
+</pre>
+
+----
+
+## filter
+
+对RDD中的数据单元进行过滤。如果过滤函数f返回true，则当前被验证的数据单元会被过滤。
+
+### 定义
+
+def filter(f: T => Boolean): RDD[T]
+
+### Example
+
+<pre>
+val a = sc.parallelize(1 to 10, 3)
+a.filter(_ % 2 == 0)
+b.collect
+res3: Array[Int] = Array(2, 4, 6, 8, 10)
+</pre>
+
+
+过滤函数需要和输入的数据类型匹配，如果输入数据是复合的数据类型可以利用partial functions。以下举了两个对比例子介绍。
+
+### Examples for mixed data without partial functions
+
+<pre>
+val b = sc.parallelize(1 to 8)
+b.filter(_ < 4).collect
+res15: Array[Int] = Array(1, 2, 3)
+
+val a = sc.parallelize(List("cat", "horse", 4.0, 3.5, 2, "dog"))
+a.filter(_ < 4).collect
+<console>:15: error: value < is not a member of Any 
+</pre>
+
+以上是一个类型不匹配而导致失败的例子。
+
+以下使用collect方法解决以上多类型数据的过滤问题，collect会使用isDefinedAt方法去判断当前输入是否符合，具体参见以下示例。
+
+### Examples for mixed data with partial functions
+
+<pre>
+val a = sc.parallelize(List("cat", "horse", 4.0, 3.5, 2, "dog"))
+a.collect({case a: Int    => "is integer" |
+           case b: String => "is string" }).collect
+res17: Array[String] = Array(is string, is string, is integer, is string)
+
+val myfunc: PartialFunction[Any, Any] = {
+  case a: Int    => "is integer" |
+  case b: String => "is string" }
+myfunc.isDefinedAt("")
+res21: Boolean = true
+
+myfunc.isDefinedAt(1)
+res22: Boolean = true
+
+myfunc.isDefinedAt(1.5)
+res23: Boolean = false
+</pre>
+
+小心，上面的代码可行是因为它只是检测了数据的类型。如果你如果像下例中的情况，你需要将Any类型转换为你想要的类型。否则编译器不知道应该生成什么字节码：
+
+<pre>
+val myfunc2: PartialFunction[Any, Any] = {case x if (x < 4) => "x"}
+<console>:10: error: value < is not a member of Any
+
+val myfunc2: PartialFunction[Int, Any] = {case x if (x < 4) => "x"}
+myfunc2: PartialFunction[Int,Any] = <function1>
+</pre>
+
+----
+
+## filterWith
+
+这个方法是filter的扩展方法。它接收两组函数。第一组执行转换Int->T，这组在每个分片(partitions)上只执行一次。它会将分片中数据的index转化成T。第二组是(U,T)->Boolean。T是上一步index变换后的结果。U是RDD中的数据单元。最后这个函数返回ture或者false。
+
+### 定义
+
+def filterWith[A: ClassTag](constructA: Int => A)(p: (T, A) => Boolean): RDD[T]
+
+### Example
+
+<pre>
+val a = sc.parallelize(1 to 9, 3)
+val b = a.filterWith(i => i)((x,i) => x % 2 == 0 || i % 2 == 0)
+b.collect
+res37: Array[Int] = Array(1, 2, 3, 4, 6, 7, 8, 9)
+
+val a = sc.parallelize(List(1,2,3,4,5,6,7,8,9,10), 5)
+a.filterWith(x=> x)((a, b) =>  b == 0).collect
+res30: Array[Int] = Array(1, 2)
+
+a.filterWith(x=> x)((a, b) =>  a % (b+1) == 0).collect
+res33: Array[Int] = Array(1, 2, 4, 6, 8, 10)
+
+a.filterWith(x=> x.toString)((a, b) =>  b == "2").collect
+res34: Array[Int] = Array(5, 6)
+</pre>
+
+----
+
+## flatMap
+
+类似map方法，但是这个方法可以输出不止一个数据单元。
+
+### 定义
+
+def flatMap[U: ClassTag](f: T => TraversableOnce[U]): RDD[U]
+
+### Example
+
+<pre>
+val a = sc.parallelize(1 to 10, 5)
+a.flatMap(1 to _).collect
+res47: Array[Int] = Array(1, 1, 2, 1, 2, 3, 1, 2, 3, 4, 1, 2, 3, 4, 5, 1, 2, 3, 4, 5, 6, 1, 2, 3, 4, 5, 6, 7, 1, 2, 3, 4, 5, 6, 7, 8, 1, 2, 3, 4, 5, 6, 7, 8, 9, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10)
+
+sc.parallelize(List(1, 2, 3), 2).flatMap(x => List(x, x, x)).collect
+res85: Array[Int] = Array(1, 1, 1, 2, 2, 2, 3, 3, 3)
+
+// The program below generates a random number of copies (up to 10) of the items in the list.
+val x  = sc.parallelize(1 to 10, 3)
+x.flatMap(List.fill(scala.util.Random.nextInt(10))(_)).collect
+
+res1: Array[Int] = Array(1, 2, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 6, 6, 6, 6, 6, 6, 6, 6, 7, 7, 7, 8, 8, 8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 10, 10, 10, 10, 10, 10, 10, 10)
+</pre>
+
+----
+
+## flatMapValues
+
+和mapValues很相似，此方法要求value是TraversableOnce类型的，输出结果会把TraversableOnce中的元素打散输出多个tuple出来。
+
+### 定义
+
+def flatMapValues[U](f: V => TraversableOnce[U]): RDD[(K, U)]
+
+### Example
+
+<pre>
+val a = sc.parallelize(List("dog", "tiger", "lion", "cat", "panther", "eagle"), 2)
+val b = a.map(x => (x.length, x))
+b.flatMapValues("x" + _ + "x").collect
+res6: Array[(Int, Char)] = Array((3,x), (3,d), (3,o), (3,g), (3,x), (5,x), (5,t), (5,i), (5,g), (5,e), (5,r), (5,x), (4,x), (4,l), (4,i), (4,o), (4,n), (4,x), (3,x), (3,c), (3,a), (3,t), (3,x), (7,x), (7,p), (7,a), (7,n), (7,t), (7,h), (7,e), (7,r), (7,x), (5,x), (5,e), (5,a), (5,g), (5,l), (5,e), (5,x)) 
+
+scala> b.flatMapValues{x=>x}.collect
+res3: Array[(Int, Char)] = Array((3,d), (3,o), (3,g), (5,t), (5,i), (5,g), (5,e), (5,r), (4,l), (4,i), (4,o), (4,n), (3,c), (3,a), (3,t), (7,p), (7,a), (7,n), (7,t), (7,h), (7,e), (7,r), (5,e), (5,a), (5,g), (5,l), (5,e))
+</pre>
+
+----
+
+## fold
+
+聚合每个数据分片的数据。每个数据分片聚合之前可以设置一个初始值zeroValue。
+
+### 定义
+
+def fold(zeroValue: T)(op: (T, T) => T): T
+
+### Example
+
+<pre>
+val a = sc.parallelize(List(1,2,3), 3)
+a.fold(0)(_ + _)
+res59: Int = 6
+</pre>
+
+----
+
+## foldByKey [Pair]
+
+功能类似fold，区别在于聚合范围不再是数据分别，而是每个key。输入的RDD数据必须是包含两个元素的tuple。
+
+### 定义
+
+def foldByKey(zeroValue: V)(func: (V, V) => V): RDD[(K, V)]
+def foldByKey(zeroValue: V, numPartitions: Int)(func: (V, V) => V): RDD[(K, V)]
+def foldByKey(zeroValue: V, partitioner: Partitioner)(func: (V, V) => V): RDD[(K, V)]
+
+### Example
+
+<pre>
+val a = sc.parallelize(List("dog", "cat", "owl", "gnu", "ant"), 2)
+val b = a.map(x => (x.length, x))
+b.foldByKey("")(_ + _).collect
+res84: Array[(Int, String)] = Array((3,dogcatowlgnuant)
+
+val a = sc.parallelize(List("dog", "tiger", "lion", "cat", "panther", "eagle"), 2)
+val b = a.map(x => (x.length, x))
+b.foldByKey("")(_ + _).collect
+res85: Array[(Int, String)] = Array((4,lion), (3,dogcat), (7,panther), (5,tigereagle)) 
+
+</pre>
+
+----
+
+## foreach
+
+针对每个数据单元执行一个无参数的方法
+
+### 定义
+
+def foreach(f: T => Unit)
+
+### Example
+
+<pre>
+val c = sc.parallelize(List("cat", "dog", "tiger", "lion", "gnu", "crocodile", "ant", "whale", "dolphin", "spider"), 3)
+c.foreach(x => println(x + "s are yummy"))
+lions are yummy
+gnus are yummy
+crocodiles are yummy
+ants are yummy
+whales are yummy
+dolphins are yummy
+spiders are yummy
+</pre>
+
+----
+
+## foreachPartition
+
+针对每个数据分片执行当前输入的无参数方法，每个分片的数据元素通过迭代器访问。
+
+### 定义
+
+def foreachPartition(f: Iterator[T] => Unit)
+
+### Example
+
+<pre>
+val b = sc.parallelize(List(1, 2, 3, 4, 5, 6, 7, 8, 9), 3)
+b.foreachPartition(x => println(x.reduce(_ + _)))
+6
+15
+24
+</pre>
+
+----
+
+## getCheckpointFile
+
+获取checkpoint文件，如果RDD没有被checkpoint则返回null
+
+### 定义
+
+def getCheckpointFile: Option[String]
+
+### Example
+
+<pre>
+sc.setCheckpointDir("/home/cloudera/Documents")
+val a = sc.parallelize(1 to 500, 5)
+val b = a++a++a++a++a
+b.getCheckpointFile
+res49: Option[String] = None
+
+b.checkpoint
+b.getCheckpointFile
+res54: Option[String] = None
+
+b.collect
+b.getCheckpointFile
+res57: Option[String] = Some(file:/home/cloudera/Documents/cb978ffb-a346-4820-b3ba-d56580787b20/rdd-40)
+</pre>
+
+----
+
+## glom
+  
+将一个Array的数据分别分组和数据分片个数相同的Array中去，并生成相应RDD。
+
+### 定义
+
+def glom(): RDD[Array[T]]
+
+### Example
+
+<pre>
+val a = sc.parallelize(1 to 100, 3)
+a.glom.collect
+res8: Array[Array[Int]] = Array(Array(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33), Array(34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66), Array(67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100))
+</pre>
+
+----
+
+## groupBy
+
+仅仅将数据分组，分组的key通过传入的函数生成。
+
+### 定义
+
+def groupBy[K: ClassTag](f: T => K): RDD[(K, Iterable[T])]
+def groupBy[K: ClassTag](f: T => K, numPartitions: Int): RDD[(K, Iterable[T])]
+def groupBy[K: ClassTag](f: T => K, p: Partitioner): RDD[(K, Iterable[T])]
+
+### Example
+
+<pre>
+val a = sc.parallelize(1 to 9, 3)
+a.groupBy(x => { if (x % 2 == 0) "even" else "odd" }).collect
+res42: Array[(String, Seq[Int])] = Array((even,ArrayBuffer(2, 4, 6, 8)), (odd,ArrayBuffer(1, 3, 5, 7, 9)))
+
+val a = sc.parallelize(1 to 9, 3)
+def myfunc(a: Int) : Int =
+{
+  a % 2
+}
+a.groupBy(myfunc).collect
+res3: Array[(Int, Seq[Int])] = Array((0,ArrayBuffer(2, 4, 6, 8)), (1,ArrayBuffer(1, 3, 5, 7, 9)))
+
+val a = sc.parallelize(1 to 9, 3)
+def myfunc(a: Int) : Int =
+{
+  a % 2
+}
+a.groupBy(x => myfunc(x), 3).collect
+a.groupBy(myfunc(_), 1).collect
+res7: Array[(Int, Seq[Int])] = Array((0,ArrayBuffer(2, 4, 6, 8)), (1,ArrayBuffer(1, 3, 5, 7, 9)))
+
+import org.apache.spark.Partitioner
+class MyPartitioner extends Partitioner {
+def numPartitions: Int = 2
+def getPartition(key: Any): Int =
+{
+    key match
+    {
+      case null     => 0
+      case key: Int => key          % numPartitions
+      case _        => key.hashCode % numPartitions
+    }
+  }
+  override def equals(other: Any): Boolean =
+  {
+    other match
+    {
+      case h: MyPartitioner => true
+      case _                => false
+    }
+  }
+}
+val a = sc.parallelize(1 to 9, 3)
+val p = new MyPartitioner()
+val b = a.groupBy((x:Int) => { x }, p)
+val c = b.mapWith(i => i)((a, b) => (b, a))
+c.collect
+res42: Array[(Int, (Int, Seq[Int]))] = Array((0,(4,ArrayBuffer(4))), (0,(2,ArrayBuffer(2))), (0,(6,ArrayBuffer(6))), (0,(8,ArrayBuffer(8))), (1,(9,ArrayBuffer(9))), (1,(3,ArrayBuffer(3))), (1,(1,ArrayBuffer(1))), (1,(7,ArrayBuffer(7))), (1,(5,ArrayBuffer(5))))
+
+</pre>
+
+----
+
+## groupByKey [Pair]
+
+相比较于groupBy, groupByKey不需要传入生成key的函数，而仅将输入二元tuple中的第一个字段当成key进行分组。
+
+### 定义
+
+def groupByKey(): RDD[(K, Iterable[V])]
+def groupByKey(numPartitions: Int): RDD[(K, Iterable[V])]
+def groupByKey(partitioner: Partitioner): RDD[(K, Iterable[V])]
+
+### Example
+
+<pre>
+val a = sc.parallelize(List("dog", "tiger", "lion", "cat", "spider", "eagle"), 2)
+val b = a.keyBy(_.length)
+b.groupByKey.collect
+res11: Array[(Int, Seq[String])] = Array((4,ArrayBuffer(lion)), (6,ArrayBuffer(spider)), (3,ArrayBuffer(dog, cat)), (5,ArrayBuffer(tiger, eagle)))
+</pre>
+
+----
+
+## histogram [Double]
+
+针对数据类型为Double的RDD统计直方图。可以输入分桶数进行平均分桶，也可以输入自定义的分桶区间。平均分桶情况下会输出两个数组，第一个是每个分桶边界值，第二个是每个分桶的统计数。自定义分桶情况下只输出一个数组，即每个分桶的统计数。
+
+### 定义
+
+def histogram(bucketCount: Int): Pair[Array[Double], Array[Long]]
+def histogram(buckets: Array[Double], evenBuckets: Boolean = false): Array[Long]
+
+### Example with even spacing
+
+<pre>
+val a = sc.parallelize(List(1.1, 1.2, 1.3, 2.0, 2.1, 7.4, 7.5, 7.6, 8.8, 9.0), 3)
+a.histogram(5)
+res11: (Array[Double], Array[Long]) = (Array(1.1, 2.68, 4.26, 5.84, 7.42, 9.0),Array(5, 0, 0, 1, 4))
+
+val a = sc.parallelize(List(9.1, 1.0, 1.2, 2.1, 1.3, 5.0, 2.0, 2.1, 7.4, 7.5, 7.6, 8.8, 10.0, 8.9, 5.5), 3)
+a.histogram(6)
+res18: (Array[Double], Array[Long]) = (Array(1.0, 2.5, 4.0, 5.5, 7.0, 8.5, 10.0),Array(6, 0, 1, 1, 3, 4))
+</pre>
+
+### Example with custom spacing
+
+<pre>
+val a = sc.parallelize(List(1.1, 1.2, 1.3, 2.0, 2.1, 7.4, 7.5, 7.6, 8.8, 9.0), 3)
+a.histogram(Array(0.0, 3.0, 8.0))
+res14: Array[Long] = Array(5, 3)
+
+val a = sc.parallelize(List(9.1, 1.0, 1.2, 2.1, 1.3, 5.0, 2.0, 2.1, 7.4, 7.5, 7.6, 8.8, 10.0, 8.9, 5.5), 3)
+a.histogram(Array(0.0, 5.0, 10.0))
+res1: Array[Long] = Array(6, 9)
+
+a.histogram(Array(0.0, 5.0, 10.0, 15.0))
+res1: Array[Long] = Array(6, 8, 1) 
+
+</pre>
+
+----
+
+## id
+
+查询分配给RDD的id号
+
+### 定义
+
+val id: Int
+
+### Example
+
+<pre>
+val y = sc.parallelize(1 to 10, 10)
+y.id
+res16: Int = 19 
+</pre>
+
+----
+
+## intersection
+
+取两个RDD的交集
+
+### 定义
+
+def intersection(other: RDD[T], numPartitions: Int): RDD[T]
+def intersection(other: RDD[T], partitioner: Partitioner)(implicit ord: Ordering[T] = null): RDD[T]
+def intersection(other: RDD[T]): RDD[T]
+
+### 
+
+<pre>
+val x = sc.parallelize(1 to 20)
+val y = sc.parallelize(10 to 30)
+val z = x.intersection(y)
+
+z.collect
+res74: Array[Int] = Array(16, 12, 20, 13, 17, 14, 18, 10, 19, 15, 11)
+</pre>
+
+----
+
+## isCheckpointed
+
+显示这个RDD是否被checkpoint了。谨记只有当执行了action操作之后相应的数据才会被checkpoint。
+
+### 定义
+
+def isCheckpointed: Boolean
+
+### Example
+
+<pre>
+sc.setCheckpointDir("/home/cloudera/Documents")
+c.isCheckpointed
+res6: Boolean = false
+
+c.checkpoint
+c.isCheckpointed
+res8: Boolean = false
+
+c.collect
+c.isCheckpointed
+res9: Boolean = true
+</pre>
+
+----
+
+## join [Pair]
+
+对两个key-value的RDD执行内连接。
+
+### 定义
+
+def join[W](other: RDD[(K, W)]): RDD[(K, (V, W))]
+def join[W](other: RDD[(K, W)], numPartitions: Int): RDD[(K, (V, W))]
+def join[W](other: RDD[(K, W)], partitioner: Partitioner): RDD[(K, (V, W))]
+
+### Example
+
+<pre>
+val a = sc.parallelize(List("dog", "salmon", "salmon", "rat", "elephant"), 3)
+val b = a.keyBy(_.length)
+val c = sc.parallelize(List("dog","cat","gnu","salmon","rabbit","turkey","wolf","bear","bee"), 3)
+val d = c.keyBy(_.length)
+b.join(d).collect
+
+res17: Array[(Int, (String, String))] = Array((6,(salmon,salmon)), (6,(salmon,rabbit)), (6,(salmon,turkey)), (6,(rabbit,salmon)), (6,(rabbit,rabbit)), (6,(rabbit,turkey)), (6,(turkey,salmon)), (6,(turkey,rabbit)), (6,(turkey,turkey)), (3,(dog,dog)), (3,(dog,cat)), (3,(dog,gnu)), (3,(dog,bee)), (3,(cat,dog)), (3,(cat,cat)), (3,(cat,gnu)), (3,(cat,bee)), (3,(gnu,dog)), (3,(gnu,cat)), (3,(gnu,gnu)), (3,(gnu,bee)), (3,(bee,dog)), (3,(bee,cat)), (3,(bee,gnu)), (3,(bee,bee)), (4,(wolf,wolf)), (4,(wolf,bear)), (4,(bear,wolf)), (4,(bear,bear)))
+</pre>
+
+----
+
+## keyBy
+
+为RDD中的每个数据单元增加一个key，即生成key-value对。输入的函数是key的构造函数。
+
+### 定义
+
+def keyBy[K](f: T => K): RDD[(K, T)]
+
+### Example
+
+<pre>
+val a = sc.parallelize(List("dog", "salmon", "salmon", "rat", "elephant"), 3)
+val b = a.keyBy(_.length)
+b.collect
+res26: Array[(Int, String)] = Array((3,dog), (6,salmon), (6,salmon), (3,rat), (8,elephant)) 
+</pre>
+
+----
+
+## keys [Pair]
+
+从RDD中抽取所有元素的key并生成新的RDD。
+
+### 定义
+
+def keys: RDD[K]
+
+### Example
+
+<pre>
+val a = sc.parallelize(List("dog", "tiger", "lion", "cat", "panther", "eagle"), 2)
+val b = a.map(x => (x.length, x))
+b.keys.collect
+res2: Array[Int] = Array(3, 5, 4, 3, 7, 5) 
+
+</pre>
+
+----
+
+## leftOuterJoin [Pair]
+
+针对两个key-value数据形式的RDD进行左外连接操作。
+
+### 定义
+
+def leftOuterJoin[W](other: RDD[(K, W)]): RDD[(K, (V, Option[W]))]
+def leftOuterJoin[W](other: RDD[(K, W)], numPartitions: Int): RDD[(K, (V, Option[W]))]
+def leftOuterJoin[W](other: RDD[(K, W)], partitioner: Partitioner): RDD[(K, (V, Option[W]))]
+
+### Example
+
+<pre>
+val a = sc.parallelize(List("dog", "salmon", "salmon", "rat", "elephant"), 3)
+val b = a.keyBy(_.length)
+val c = sc.parallelize(List("dog","cat","gnu","salmon","rabbit","turkey","wolf","bear","bee"), 3)
+val d = c.keyBy(_.length)
+b.leftOuterJoin(d).collect
+
+res1: Array[(Int, (String, Option[String]))] = Array((6,(salmon,Some(salmon))), (6,(salmon,Some(rabbit))), (6,(salmon,Some(turkey))), (6,(salmon,Some(salmon))), (6,(salmon,Some(rabbit))), (6,(salmon,Some(turkey))), (3,(dog,Some(dog))), (3,(dog,Some(cat))), (3,(dog,Some(gnu))), (3,(dog,Some(bee))), (3,(rat,Some(dog))), (3,(rat,Some(cat))), (3,(rat,Some(gnu))), (3,(rat,Some(bee))), (8,(elephant,None))) 
+
+</pre>
+
+----
+
+## lookup
+
+遍历RDD中所有的key，找到符合输入key的value，并输出scala的seq数据。
+
+### 定义
+
+def lookup(key: K): Seq[V]
+
+### Example
+
+<pre>
+val a = sc.parallelize(List("dog", "tiger", "lion", "cat", "panther", "eagle"), 2)
+val b = a.map(x => (x.length, x))
+b.lookup(5)
+res0: Seq[String] = WrappedArray(tiger, eagle) 
+
+</pre>
+
+----
+
+## map
+
+针对RDD中的每个数据元素执行map函数，并返回处理后的新RDD。
+
+### 定义
+
+def map[U: ClassTag](f: T => U): RDD[U]
+
+### Example
+
+<pre>
+val a = sc.parallelize(List("dog", "salmon", "salmon", "rat", "elephant"), 3)
+val b = a.map(_.length)
+val c = a.zip(b)
+c.collect
+res0: Array[(String, Int)] = Array((dog,3), (salmon,6), (salmon,6), (rat,3), (elephant,8))
+</pre>
+
+----
+
+## mapPartitions
+
+这是个特殊的map，它在每个数据分片上只执行一次。分片上的数据作为数据序列输入到处理函数，输入数据类型是迭代器(Iterarator[T])。处理函数返回另外一个迭代器。最终mapPartitions会调用合并程序将多个数据分片返回的数据合并成一个新的RDD。
+
+### 定义
+
+def mapPartitions[U: ClassTag](f: Iterator[T] => Iterator[U], preservesPartitioning: Boolean = false): RDD[U]
+
+### Example 1
+
+<pre>
+val a = sc.parallelize(1 to 9, 3)
+def myfunc[T](iter: Iterator[T]) : Iterator[(T, T)] = {
+  var res = List[(T, T)]()
+  var pre = iter.next
+  while (iter.hasNext)
+  {
+    val cur = iter.next;
+    res .::= (pre, cur)
+    pre = cur;
+  }
+  res.iterator
+}
+a.mapPartitions(myfunc).collect
+res0: Array[(Int, Int)] = Array((2,3), (1,2), (5,6), (4,5), (8,9), (7,8)) 
+</pre>
+
+### Example 2
+
+<pre>
+val x = sc.parallelize(List(1, 2, 3, 4, 5, 6, 7, 8, 9,10), 3)
+def myfunc(iter: Iterator[Int]) : Iterator[Int] = {
+  var res = List[Int]()
+  while (iter.hasNext) {
+    val cur = iter.next;
+    res = res ::: List.fill(scala.util.Random.nextInt(10))(cur)
+  }
+  res.iterator
+}
+x.mapPartitions(myfunc).collect
+// some of the number are not outputted at all. This is because the random number generated for it is zero.
+res8: Array[Int] = Array(1, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 5, 7, 7, 7, 9, 9, 10)
+</pre>
+
+上面的示例也可以用**flatMap**实现，示例如下：
+
+### Example 2 using flatmap
+
+<pre>
+val x  = sc.parallelize(1 to 10, 3)
+x.flatMap(List.fill(scala.util.Random.nextInt(10))(_)).collect
+
+res1: Array[Int] = Array(1, 2, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4, 4, 5, 5, 6, 6, 6, 6, 6, 6, 6, 6, 7, 7, 7, 8, 8, 8, 8, 8, 8, 8, 8, 9, 9, 9, 9, 9, 10, 10, 10, 10, 10, 10, 10, 10) 
+
+</pre>
+
+----
+
+## mapPartitionsWithContext   (developer API)
+
+功能类似于mapPartitions，但是处理函数会带有当前节点的相关信息。
+
+### 定义
+
+def mapPartitionsWithContext[U: ClassTag](f: (TaskContext, Iterator[T]) => Iterator[U], preservesPartitioning: Boolean = false): RDD[U]
+
+### Example
+
+<pre>
+val a = sc.parallelize(1 to 9, 3)
+import org.apache.spark.TaskContext
+def myfunc(tc: TaskContext, iter: Iterator[Int]) : Iterator[Int] = {
+  tc.addOnCompleteCallback(() => println(
+    "Partition: "     + tc.partitionId +
+    ", AttemptID: "   + tc.attemptId ))
+  
+  iter.toList.filter(_ % 2 == 0).iterator
+}
+a.mapPartitionsWithContext(myfunc).collect
+
+14/04/01 23:05:48 INFO SparkContext: Starting job: collect at <console>:20
+...
+14/04/01 23:05:48 INFO Executor: Running task ID 0
+Partition: 0, AttemptID: 0, Interrupted: false
+...
+14/04/01 23:05:48 INFO Executor: Running task ID 1
+14/04/01 23:05:48 INFO TaskSetManager: Finished TID 0 in 470 ms on localhost (progress: 0/3)
+...
+14/04/01 23:05:48 INFO Executor: Running task ID 2
+14/04/01 23:05:48 INFO TaskSetManager: Finished TID 1 in 23 ms on localhost (progress: 1/3)
+14/04/01 23:05:48 INFO DAGScheduler: Completed ResultTask(0, 1)
+
+?
+res0: Array[Int] = Array(2, 6, 4, 8)
+</pre>
+
+----
+
+## mapPartitionsWithIndex
+
+功能和mapPartitions类似，但是有两个输入参数。第一个参数是数据分片的索引值，第二个参数是当前分片数据的迭代器。输出是当前分片数据处理后的数据迭代器。
+
+### 定义
+
+def mapPartitionsWithIndex[U: ClassTag](f: (Int, Iterator[T]) => Iterator[U], preservesPartitioning: Boolean = false): RDD[U]
+
+### Example
+
+<pre>
+val x = sc.parallelize(List(1,2,3,4,5,6,7,8,9,10), 3)
+def myfunc(index: Int, iter: Iterator[Int]) : Iterator[String] = {
+  iter.toList.map(x => index + "," + x).iterator
+}
+x.mapPartitionsWithIndex(myfunc).collect()
+res10: Array[String] = Array(0,1, 0,2, 0,3, 1,4, 1,5, 1,6, 2,7, 2,8, 2,9, 2,10) 
+
+</pre>
+
+----
+
+## mapValues [Pair]
+
+将输入的二元tuple数据的value值逐一转换处理，并输出包含原有key和处理后value的二元tuple，最终输出处理后二元tuple的RDD。
+
+### 定义
+
+def mapValues[U](f: V => U): RDD[(K, U)]
+
+### Example
+
+<pre>
+val a = sc.parallelize(List("dog", "tiger", "lion", "cat", "panther", "eagle"), 2)
+val b = a.map(x => (x.length, x))
+b.mapValues("x" + _ + "x").collect
+res5: Array[(Int, String)] = Array((3,xdogx), (5,xtigerx), (4,xlionx), (3,xcatx), (7,xpantherx), (5,xeaglex))
+</pre>
+
+----
+
+## max
+
+返回RDD中最大的元素。
+
+### 定义
+
+def max()(implicit ord: Ordering[T]): T
+
+### Example
+
+<pre>
+val y = sc.parallelize(10 to 30)
+y.max
+res75: Int = 30
+</pre>
+
+----
+
+mean [Double], meanApprox [Double]
+
+计算RDD中的均值，meanApprox提供近似算法，提高计算速度但是不精确。
+
+### 定义
+
+def mean(): Double
+def meanApprox(timeout: Long, confidence: Double = 0.95): PartialResult[BoundedDouble]
+
+### Example
+
+<pre>
+val a = sc.parallelize(List(9.1, 1.0, 1.2, 2.1, 1.3, 5.0, 2.0, 2.1, 7.4, 7.5, 7.6, 8.8, 10.0, 8.9, 5.5), 3)
+a.mean
+res0: Double = 5.3 
+</pre>
+
+----
+
+## min
+
+返回RDD中最小的元素
+
+### 定义
+
+def min()(implicit ord: Ordering[T]): T
+
+### Example
+
+<pre>
+val y = sc.parallelize(10 to 30)
+y.min
+res75: Int = 10 
+
+val y = sc.parallelize(Array("1","2","!","a"))
+y.min
+res4: String = !
+</pre>
+
+----
+
+## name, setName
+
+给RDD打标签
+
+### 定义
+
+@transient var name: String
+def setName(_name: String)
+
+### Example
+
+<pre>
+val y = sc.parallelize(1 to 10, 10)
+y.name
+res13: String = null
+y.setName("Fancy RDD Name")
+y.name
+res15: String = Fancy RDD Name
+</pre>
+
+----
+
+## partitionBy [Pair]
+
+将数据重新分片
+
+### 定义
+
+def partitionBy(partitioner: Partitioner): RDD[(K, V)]
+
+----
+
+## partitioner 
+
+设置默认的partitioner，这个默认partitioner会在groupBy,subtract,reduceByKey等方法中用到。
+
+### 定义
+
+@transient val partitioner: Option[Partitioner]
+
+----
+
+## partitions 
+
+返回与当前RDD关联的partition对象。
+
+### 定义
+
+final def partitions: Array[Partition]
+
+### Example
+
+<pre>
+val b = sc.parallelize(List("Gnu", "Cat", "Rat", "Dog", "Gnu", "Rat"), 2)
+b.partitions
+res48: Array[org.apache.spark.Partition] = Array(org.apache.spark.rdd.ParallelCollectionPartition@18aa, org.apache.spark.rdd.ParallelCollectionPartition@18ab) 
+</pre>
+
+----
+
+## persist, cache
+
+这个函数可以用来调整RDD的存储等级。释放内存的时候，Spark需要根据这些存储等级标签决定释放谁。persist()和cache()是persist(StorageLevel.MEMORY_ONLY)的缩写。（Warning:一旦存储等级被改变，则它不能被再次改变！）
+
+### 定义
+
+def cache(): RDD[T]
+def persist(): RDD[T]
+def persist(newLevel: StorageLevel): RDD[T]
+
+### Example
+
+<pre>
+val c = sc.parallelize(List("Gnu", "Cat", "Rat", "Dog", "Gnu", "Rat"), 2)
+c.getStorageLevel
+res0: org.apache.spark.storage.StorageLevel = StorageLevel(false, false, false, false, 1)
+c.cache
+c.getStorageLevel
+res2: org.apache.spark.storage.StorageLevel = StorageLevel(false, true, false, true, 1)
+</pre>
+
+----
+
+## pipe 
+
+将RDD的每个数据分片都接到shell-command的标准输入上。经过shell-command的输出数据会重新生成新的RDD，新RDD是string类型的RDD。
+
+### 定义
+
+def pipe(command: String): RDD[String]
+def pipe(command: String, env: Map[String, String]): RDD[String]
+def pipe(command: Seq[String], env: Map[String, String] = Map(), printPipeContext: (String => Unit) => Unit = null, printRDDElement: (T, String => Unit) => Unit = null): RDD[String]
+
+### Example
+
+<pre>
+val a = sc.parallelize(1 to 9, 3)
+a.pipe("head -n 1").collect
+res2: Array[String] = Array(1, 4, 7) 
+</pre>
+
+----
+
+## randomSplit 
+
+数据集切分方法。随机将RDD的数据切分到多个小RDD中。切分比率由输入的权重Array确定。切分不会严格和输入的比率相同，同时也可以设定随机seed。
+
+### 定义
+
+def randomSplit(weights: Array[Double], seed: Long = Utils.random.nextLong): Array[RDD[T]]
+
+### Example
+
+<pre>
+val y = sc.parallelize(1 to 10)
+val splits = y.randomSplit(Array(0.6, 0.4), seed = 11L)
+val training = splits(0)
+val test = splits(1)
+training.collect
+res:85 Array[Int] = Array(1, 4, 5, 6, 8, 10)
+test.collect
+res86: Array[Int] = Array(2, 3, 7, 9)
+
+val y = sc.parallelize(1 to 10)
+val splits = y.randomSplit(Array(0.1, 0.3, 0.6))
+
+val rdd1 = splits(0)
+val rdd2 = splits(1)
+val rdd3 = splits(2)
+
+rdd1.collect
+res87: Array[Int] = Array(4, 10)
+rdd2.collect
+res88: Array[Int] = Array(1, 3, 5, 8)
+rdd3.collect
+res91: Array[Int] = Array(2, 6, 7, 9)
+</pre>
+
+----
+
+## reduce 
+
+这个方法是Spark中很有名的方法，需要注意的是，其中输入的f的输入输出参数类型一致。
+
+### 定义
+
+def reduce(f: (T, T) => T): T
+
+### Example
+
+<pre>
+val a = sc.parallelize(1 to 100, 3)
+a.reduce(_ + _)
+res41: Int = 5050
+</pre>
+
+----
+
+## reduceByKey [Pair],  reduceByKeyLocally [Pair]
+
+相对于reduce方法，这个方法会在同一key下进行reduce操作。reduceByKeyLocally与reduceByKey的区别是前者将数据返回到master节点中，并返回map结果，后者只返回RDD结果。
+
+### 定义
+
+def reduceByKey(func: (V, V) => V): RDD[(K, V)]
+def reduceByKey(func: (V, V) => V, numPartitions: Int): RDD[(K, V)]
+def reduceByKey(partitioner: Partitioner, func: (V, V) => V): RDD[(K, V)]
+def reduceByKeyLocally(func: (V, V) => V): Map[K, V]
+
+### Example
+
+<pre>
+val a = sc.parallelize(List("dog", "cat", "owl", "gnu", "ant"), 2)
+val b = a.map(x => (x.length, x))
+b.reduceByKey(_ + _).collect
+res86: Array[(Int, String)] = Array((3,dogcatowlgnuant))
+
+val a = sc.parallelize(List("dog", "tiger", "lion", "cat", "panther", "eagle"), 2)
+val b = a.map(x => (x.length, x))
+b.reduceByKey(_ + _).collect
+res87: Array[(Int, String)] = Array((4,lion), (3,dogcat), (7,panther), (5,tigereagle)) 
+</pre>
+
+----
+
+## rightOuterJoin [Pair]
+
+执行两个(key-value)RDD的右外连接。
+
+### 定义
+
+def rightOuterJoin[W](other: RDD[(K, W)]): RDD[(K, (Option[V], W))]
+def rightOuterJoin[W](other: RDD[(K, W)], numPartitions: Int): RDD[(K, (Option[V], W))]
+def rightOuterJoin[W](other: RDD[(K, W)], partitioner: Partitioner): RDD[(K, (Option[V], W))]
+
+### Example
+
+<pre>
+val a = sc.parallelize(List("dog", "salmon", "salmon", "rat", "elephant"), 3)
+val b = a.keyBy(_.length)
+val c = sc.parallelize(List("dog","cat","gnu","salmon","rabbit","turkey","wolf","bear","bee"), 3)
+val d = c.keyBy(_.length)
+b.rightOuterJoin(d).collect
+
+res2: Array[(Int, (Option[String], String))] = Array((6,(Some(salmon),salmon)), (6,(Some(salmon),rabbit)), (6,(Some(salmon),turkey)), (6,(Some(salmon),salmon)), (6,(Some(salmon),rabbit)), (6,(Some(salmon),turkey)), (3,(Some(dog),dog)), (3,(Some(dog),cat)), (3,(Some(dog),gnu)), (3,(Some(dog),bee)), (3,(Some(rat),dog)), (3,(Some(rat),cat)), (3,(Some(rat),gnu)), (3,(Some(rat),bee)), (4,(None,wolf)), (4,(None,bear)))
+</pre>
+
+----
+
+## sample
+
+随机取样
+
+### 定义
+
+def sample(withReplacement: Boolean, fraction: Double, seed: Int): RDD[T]
+
+### Example
+
+<pre>
+val a = sc.parallelize(1 to 10000, 3)
+a.sample(false, 0.1, 0).count
+res24: Long = 960
+
+a.sample(true, 0.3, 0).count
+res25: Long = 2888
+
+a.sample(true, 0.3, 13).count
+res26: Long = 2985
+</pre>
+
+----
+
+## saveAsObjectFile
+
+将RDD存入二进制文件
+
+### 定义
+
+def saveAsObjectFile(path: String)
+
+### 
+
+<pre>
+val x = sc.parallelize(1 to 100, 3)
+x.saveAsObjectFile("objFile")
+val y = sc.objectFile[Array[Int]]("objFile")
+y.collect
+res52: Array[Int] = Array(67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33) 
+</pre>
+
+----
+
+## saveAsSequenceFile [SeqFile]
+
+保存RDD为一个Hadoop的sequence文件
+
+### 定义
+
+def saveAsSequenceFile(path: String, codec: Option[Class[_ <: CompressionCodec]] = None)
+
+### Example
+
+<pre>
+val v = sc.parallelize(Array(("owl",3), ("gnu",4), ("dog",1), ("cat",2), ("ant",5)), 2)
+v.saveAsSequenceFile("hd_seq_file")
+14/04/19 05:45:43 INFO FileOutputCommitter: Saved output of task 'attempt_201404190545_0000_m_000001_191' to file:/home/cloudera/hd_seq_file
+
+[cloudera@localhost ~]$ ll ~/hd_seq_file
+total 8
+-rwxr-xr-x 1 cloudera cloudera 117 Apr 19 05:45 part-00000
+-rwxr-xr-x 1 cloudera cloudera 133 Apr 19 05:45 part-00001
+-rwxr-xr-x 1 cloudera cloudera   0 Apr 19 05:45 _SUCCESS
+</pre>
+
+----
+
+## saveAsTextFile
+
+保存RDD为文本文件。一次一行
+
+### 定义
+
+def saveAsTextFile(path: String)
+def saveAsTextFile(path: String, codec: Class[_ <: CompressionCodec])
+
+### Example without compression
+
+<pre>
+val a = sc.parallelize(1 to 10000, 3)
+a.saveAsTextFile("mydata_a")
+14/04/03 21:11:36 INFO FileOutputCommitter: Saved output of task 'attempt_201404032111_0000_m_000002_71' to file:/home/cloudera/Documents/spark-0.9.0-incubating-bin-cdh4/bin/mydata_a
+
+
+[cloudera@localhost ~]$ head -n 5 ~/Documents/spark-0.9.0-incubating-bin-cdh4/bin/mydata_a/part-00000
+1
+2
+3
+4
+5
+
+// Produces 3 output files since we have created the a RDD with 3 partitions
+[cloudera@localhost ~]$ ll ~/Documents/spark-0.9.0-incubating-bin-cdh4/bin/mydata_a/
+-rwxr-xr-x 1 cloudera cloudera 15558 Apr  3 21:11 part-00000
+-rwxr-xr-x 1 cloudera cloudera 16665 Apr  3 21:11 part-00001
+-rwxr-xr-x 1 cloudera cloudera 16671 Apr  3 21:11 part-00002
+</pre>
+  
+### Example with compression
+
+<pre>
+import org.apache.hadoop.io.compress.GzipCodec
+a.saveAsTextFile("mydata_b", classOf[GzipCodec])
+
+[cloudera@localhost ~]$ ll ~/Documents/spark-0.9.0-incubating-bin-cdh4/bin/mydata_b/
+total 24
+-rwxr-xr-x 1 cloudera cloudera 7276 Apr  3 21:29 part-00000.gz
+-rwxr-xr-x 1 cloudera cloudera 6517 Apr  3 21:29 part-00001.gz
+-rwxr-xr-x 1 cloudera cloudera 6525 Apr  3 21:29 part-00002.gz
+
+val x = sc.textFile("mydata_b")
+x.count
+res2: Long = 10000
+</pre>
+
+### Example writing into HDFS
+
+<pre>
+val x = sc.parallelize(List(1,2,3,4,5,6,6,7,9,8,10,21), 3)
+x.saveAsTextFile("hdfs://localhost:8020/user/cloudera/test");
+
+val sp = sc.textFile("hdfs://localhost:8020/user/cloudera/sp_data")
+sp.flatMap(_.split(" ")).saveAsTextFile("hdfs://localhost:8020/user/cloudera/sp_x")
+</pre>
+
+----
+
+## stats [Double]
+
+同时计算均值，方差，以及标准差。
+
+### 定义
+
+def stats(): StatCounter
+
+### Example
+
+<pre>
+val x = sc.parallelize(List(1.0, 2.0, 3.0, 5.0, 20.0, 19.02, 19.29, 11.09, 21.0), 2)
+x.stats
+res16: org.apache.spark.util.StatCounter = (count: 9, mean: 11.266667, stdev: 8.126859) 
+
+</pre>
+
+----
+
+## sortBy
+
+这个方法将RDD的数据排序并存入新的RDD，第一个参数传入方法指定排序key，第二个参数指定是逆序还是顺序。
+
+### 定义
+
+def sortBy[K](f: (T) ⇒ K, ascending: Boolean = true, numPartitions: Int = this.partitions.size)(implicit ord: Ordering[K], ctag: ClassTag[K]): RDD[T]
+
+### Example
+
+<pre>
+
+val y = sc.parallelize(Array(5, 7, 1, 3, 2, 1))
+y.sortBy(c => c, true).collect
+res101: Array[Int] = Array(1, 1, 2, 3, 5, 7)
+
+y.sortBy(c => c, false).collect
+res102: Array[Int] = Array(7, 5, 3, 2, 1, 1)
+
+val z = sc.parallelize(Array(("H", 10), ("A", 26), ("Z", 1), ("L", 5)))
+z.sortBy(c => c._1, true).collect
+res109: Array[(String, Int)] = Array((A,26), (H,10), (L,5), (Z,1))
+
+z.sortBy(c => c._2, true).collect
+res108: Array[(String, Int)] = Array((Z,1), (L,5), (H,10), (A,26)) 
+
+</pre>
+
+----
+
+## sortByKey [Ordered]
+
+这个方法按Key进行排序，并输出新RDD。输出的RDD数据是经过shuffled之后的，因为在在输出的reducer里数据已经被shuffle了。
+
+### 定义
+
+def sortByKey(ascending: Boolean = true, numPartitions: Int = self.partitions.size): RDD[P]
+
+### Example
+
+<pre>
+val a = sc.parallelize(List("dog", "cat", "owl", "gnu", "ant"), 2)
+val b = sc.parallelize(1 to a.count.toInt, 2)
+val c = a.zip(b)
+c.sortByKey(true).collect
+res74: Array[(String, Int)] = Array((ant,5), (cat,2), (dog,1), (gnu,4), (owl,3))
+c.sortByKey(false).collect
+res75: Array[(String, Int)] = Array((owl,3), (gnu,4), (dog,1), (cat,2), (ant,5))
+
+val a = sc.parallelize(1 to 100, 5)
+val b = a.cartesian(a)
+val c = sc.parallelize(b.takeSample(true, 5, 13), 2)
+val d = c.sortByKey(false)
+res56: Array[(Int, Int)] = Array((96,9), (84,76), (59,59), (53,65), (52,4)) 
+
+</pre>
+
+----
+
+## stdev [Double], sampleStdev [Double]
+
+调用stats方法并抽取其中stdev结果或者sampleStdev结果。
+
+### 定义
+
+def stdev(): Double
+def sampleStdev(): Double
+
+### Example
+
+<pre>
+val d = sc.parallelize(List(0.0, 0.0, 0.0), 3)
+d.stdev
+res10: Double = 0.0
+d.sampleStdev
+res11: Double = 0.0
+
+val d = sc.parallelize(List(0.0, 1.0), 3)
+d.stdev
+d.sampleStdev
+res18: Double = 0.5
+res19: Double = 0.7071067811865476
+
+val d = sc.parallelize(List(0.0, 0.0, 1.0), 3)
+d.stdev
+res14: Double = 0.4714045207910317
+d.sampleStdev
+res15: Double = 0.5773502691896257
+</pre>
+
+----
+
+## subtract
+
+实现差集
+
+### 定义
+
+def subtract(other: RDD[T]): RDD[T]
+def subtract(other: RDD[T], numPartitions: Int): RDD[T]
+def subtract(other: RDD[T], p: Partitioner): RDD[T]
+
+### Example
+
+<pre>
+val a = sc.parallelize(1 to 9, 3)
+val b = sc.parallelize(1 to 3, 3)
+val c = a.subtract(b)
+c.collect
+res3: Array[Int] = Array(6, 9, 4, 7, 5, 8) 
+
+</pre>
+
+----
+
+## subtractByKey [Pair]
+
+实现差集，但按key求差。
+
+### 定义
+
+def subtractByKey[W: ClassTag](other: RDD[(K, W)]): RDD[(K, V)]
+def subtractByKey[W: ClassTag](other: RDD[(K, W)], numPartitions: Int): RDD[(K, V)]
+def subtractByKey[W: ClassTag](other: RDD[(K, W)], p: Partitioner): RDD[(K, V)]
+
+### Example
+
+<pre>
+val a = sc.parallelize(List("dog", "tiger", "lion", "cat", "spider", "eagle"), 2)
+val b = a.keyBy(_.length)
+val c = sc.parallelize(List("ant", "falcon", "squid"), 2)
+val d = c.keyBy(_.length)
+b.subtractByKey(d).collect
+res15: Array[(Int, String)] = Array((4,lion)) 
+
+</pre>
+
+----
+
+## sum [Double], sumApprox [Double]
+
+求RDD中所有value的和值，sumApprox是近似方法，不精确但速度快。
+
+### 定义
+
+def sum(): Double
+def sumApprox(timeout: Long, confidence: Double = 0.95): PartialResult[BoundedDouble]
+
+### Example
+
+<pre>
+val x = sc.parallelize(List(1.0, 2.0, 3.0, 5.0, 20.0, 19.02, 19.29, 11.09, 21.0), 2)
+x.sum
+res17: Double = 101.39999999999999 
+
+</pre>
+
+----
+
+## take
+
+将RDD中前n个数据单元抽取出来作为array返回。
+
+### 定义
+
+def take(num: Int): Array[T]
+
+### Example
+
+<pre>
+val b = sc.parallelize(List("dog", "cat", "ape", "salmon", "gnu"), 2)
+b.take(2)
+res18: Array[String] = Array(dog, cat)
+
+val b = sc.parallelize(1 to 10000, 5000)
+b.take(100)
+res6: Array[Int] = Array(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60, 61, 62, 63, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80, 81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100)
+</pre>
+
+----
+
+## takeOrdered
+
+用RDD数据单元本身隐含的排序方法进行排序，排序后返回前n个元素组成的array。
+
+### 定义
+
+def takeOrdered(num: Int)(implicit ord: Ordering[T]): Array[T]
+
+### Example
+
+<pre>
+val b = sc.parallelize(List("dog", "cat", "ape", "salmon", "gnu"), 2)
+b.takeOrdered(2)
+res19: Array[String] = Array(ape, cat) 
+
+</pre>
+
+----
+
+## takeSample
+
+以下是和sample的区别：
+* 返回具体个数的样本（第二个参数指定）
+* 直接返回array而不是RDD
+* 内部会将返回结果随机打散
+
+### 定义
+
+def takeSample(withReplacement: Boolean, num: Int, seed: Int): Array[T]
+
+### Example
+
+<pre>
+val x = sc.parallelize(1 to 1000, 3)
+x.takeSample(true, 100, 1)
+res3: Array[Int] = Array(339, 718, 810, 105, 71, 268, 333, 360, 341, 300, 68, 848, 431, 449, 773, 172, 802, 339, 431, 285, 937, 301, 167, 69, 330, 864, 40, 645, 65, 349, 613, 468, 982, 314, 160, 675, 232, 794, 577, 571, 805, 317, 136, 860, 522, 45, 628, 178, 321, 482, 657, 114, 332, 728, 901, 290, 175, 876, 227, 130, 863, 773, 559, 301, 694, 460, 839, 952, 664, 851, 260, 729, 823, 880, 792, 964, 614, 821, 683, 364, 80, 875, 813, 951, 663, 344, 546, 918, 436, 451, 397, 670, 756, 512, 391, 70, 213, 896, 123, 858)
+</pre>
+
+----
+
+## toDebugString
+
+以string的形式返回RDD和它所依赖的RDD的调试信息
+
+### 定义
+
+def toDebugString: String
+
+### Example
+
+<pre>
+val a = sc.parallelize(1 to 9, 3)
+val b = sc.parallelize(1 to 3, 3)
+val c = a.subtract(b)
+c.toDebugString
+res6: String = 
+MappedRDD[15] at subtract at <console>:16 (3 partitions)
+  SubtractedRDD[14] at subtract at <console>:16 (3 partitions)
+    MappedRDD[12] at subtract at <console>:16 (3 partitions)
+      ParallelCollectionRDD[10] at parallelize at <console>:12 (3 partitions)
+    MappedRDD[13] at subtract at <console>:16 (3 partitions)
+      ParallelCollectionRDD[11] at parallelize at <console>:12 (3 partitions) 
+
+</pre>
+
+----
+
+## toJavaRDD
+
+将RDD对象嵌入JavaRDD对象中并返回JavaRDD。
+
+### 定义
+
+def toJavaRDD() : JavaRDD[T]
+
+### Example
+
+<pre>
+val c = sc.parallelize(List("Gnu", "Cat", "Rat", "Dog"), 2)
+c.toJavaRDD
+res3: org.apache.spark.api.java.JavaRDD[String] = ParallelCollectionRDD[6] at parallelize at <console>:12 
+
+</pre>
+
+----
+
+## top
+
+依着输入数据默认的排序机制，取出排序后的前n个value，并组成array返回。
+
+### 定义
+
+ddef top(num: Int)(implicit ord: Ordering[T]): Array[T]
+
+### Example
+
+<pre>
+val c = sc.parallelize(Array(6, 9, 4, 7, 5, 8), 2)
+c.top(2)
+res28: Array[Int] = Array(9, 8)
+</pre>
+
+----
+
+## toString
+
+将RDD组装出一个可读的文本。
+
+### 定义
+
+override def toString: String
+
+### Example
+
+<pre>
+val a = sc.parallelize(1 to 9, 3)
+val b = sc.parallelize(1 to 3, 3)
+val c = a.subtract(b)
+c.toString
+res7: String = MappedRDD[15] at subtract at <console>:16
+</pre>
+
+----
+
+## union, ++
+
+执行集合合并操作
+
+### 定义
+
+def ++(other: RDD[T]): RDD[T]
+def union(other: RDD[T]): RDD[T]
+
+### Example
+
+<pre>
+val a = sc.parallelize(1 to 3, 1)
+val b = sc.parallelize(5 to 7, 1)
+(a ++ b).collect
+res0: Array[Int] = Array(1, 2, 3, 5, 6, 7)
+</pre>
+
+----
+
+## unpersist
+
+释放RDD，将存入磁盘和内存的数据元素释放。但是RDD对象会被保留，在后续使用它的时候，Spark会重新依据依赖图计算。
+
+### 定义
+
+def unpersist(blocking: Boolean = true): RDD[T]
+
+### Example
+
+<pre>
+val y = sc.parallelize(1 to 10, 10)
+val z = (y++y)
+z.collect
+z.unpersist(true)
+14/04/19 03:04:57 INFO UnionRDD: Removing RDD 22 from persistence list
+14/04/19 03:04:57 INFO BlockManager: Removing RDD 22 
+
+</pre>
+
+----
+
+## values
+
+抽取所有tuple中的value并组装成新的RDD返回。
+
+### 定义
+
+def values: RDD[V]
+
+### Example
+
+<pre>
+val a = sc.parallelize(List("dog", "tiger", "lion", "cat", "panther", "eagle"), 2)
+val b = a.map(x => (x.length, x))
+b.values.collect
+res3: Array[String] = Array(dog, tiger, lion, cat, panther, eagle) 
+
+</pre>
+
+----
+
+## variance [Double], sampleVariance [Double]
+
+调用stats方法，并返回其中variance值或者sampleVariance值
+
+### 定义
+
+def variance(): Double
+def sampleVariance(): Double
+
+### Example
+
+<pre>
+val a = sc.parallelize(List(9.1, 1.0, 1.2, 2.1, 1.3, 5.0, 2.0, 2.1, 7.4, 7.5, 7.6, 8.8, 10.0, 8.9, 5.5), 3)
+a.variance
+res70: Double = 10.605333333333332
+
+val x = sc.parallelize(List(1.0, 2.0, 3.0, 5.0, 20.0, 19.02, 19.29, 11.09, 21.0), 2)
+x.variance
+res14: Double = 66.04584444444443
+
+x.sampleVariance
+res13: Double = 74.30157499999999 
+
+</pre>
+
+----
+
+## zip
+
+将两个RDD中第i个元素组成一个tuple，进而形成(key-value)的PairRDD。
+
+### 定义
+
+def zip[U: ClassTag](other: RDD[U]): RDD[(T, U)]
+
+### Example
+
+<pre>
+val a = sc.parallelize(1 to 100, 3)
+val b = sc.parallelize(101 to 200, 3)
+a.zip(b).collect
+res1: Array[(Int, Int)] = Array((1,101), (2,102), (3,103), (4,104), (5,105), (6,106), (7,107), (8,108), (9,109), (10,110), (11,111), (12,112), (13,113), (14,114), (15,115), (16,116), (17,117), (18,118), (19,119), (20,120), (21,121), (22,122), (23,123), (24,124), (25,125), (26,126), (27,127), (28,128), (29,129), (30,130), (31,131), (32,132), (33,133), (34,134), (35,135), (36,136), (37,137), (38,138), (39,139), (40,140), (41,141), (42,142), (43,143), (44,144), (45,145), (46,146), (47,147), (48,148), (49,149), (50,150), (51,151), (52,152), (53,153), (54,154), (55,155), (56,156), (57,157), (58,158), (59,159), (60,160), (61,161), (62,162), (63,163), (64,164), (65,165), (66,166), (67,167), (68,168), (69,169), (70,170), (71,171), (72,172), (73,173), (74,174), (75,175), (76,176), (77,177), (78,...
+
+val a = sc.parallelize(1 to 100, 3)
+val b = sc.parallelize(101 to 200, 3)
+val c = sc.parallelize(201 to 300, 3)
+a.zip(b).zip(c).map((x) => (x._1._1, x._1._2, x._2 )).collect
+res12: Array[(Int, Int, Int)] = Array((1,101,201), (2,102,202), (3,103,203), (4,104,204), (5,105,205), (6,106,206), (7,107,207), (8,108,208), (9,109,209), (10,110,210), (11,111,211), (12,112,212), (13,113,213), (14,114,214), (15,115,215), (16,116,216), (17,117,217), (18,118,218), (19,119,219), (20,120,220), (21,121,221), (22,122,222), (23,123,223), (24,124,224), (25,125,225), (26,126,226), (27,127,227), (28,128,228), (29,129,229), (30,130,230), (31,131,231), (32,132,232), (33,133,233), (34,134,234), (35,135,235), (36,136,236), (37,137,237), (38,138,238), (39,139,239), (40,140,240), (41,141,241), (42,142,242), (43,143,243), (44,144,244), (45,145,245), (46,146,246), (47,147,247), (48,148,248), (49,149,249), (50,150,250), (51,151,251), (52,152,252), (53,153,253), (54,154,254), (55,155,255)...
+</pre>
+
+----
+
+## zipParititions
+
+功能与zip相近，但是可以对zip过程提供更多的控制。
+
+### 定义
+
+def zipPartitions[B: ClassTag, V: ClassTag](rdd2: RDD[B])(f: (Iterator[T], Iterator[B]) => Iterator[V]): RDD[V]
+def zipPartitions[B: ClassTag, V: ClassTag](rdd2: RDD[B], preservesPartitioning: Boolean)(f: (Iterator[T], Iterator[B]) => Iterator[V]): RDD[V]
+def zipPartitions[B: ClassTag, C: ClassTag, V: ClassTag](rdd2: RDD[B], rdd3: RDD[C])(f: (Iterator[T], Iterator[B], Iterator[C]) => Iterator[V]): RDD[V]
+def zipPartitions[B: ClassTag, C: ClassTag, V: ClassTag](rdd2: RDD[B], rdd3: RDD[C], preservesPartitioning: Boolean)(f: (Iterator[T], Iterator[B], Iterator[C]) => Iterator[V]): RDD[V]
+def zipPartitions[B: ClassTag, C: ClassTag, D: ClassTag, V: ClassTag](rdd2: RDD[B], rdd3: RDD[C], rdd4: RDD[D])(f: (Iterator[T], Iterator[B], Iterator[C], Iterator[D]) => Iterator[V]): RDD[V]
+def zipPartitions[B: ClassTag, C: ClassTag, D: ClassTag, V: ClassTag](rdd2: RDD[B], rdd3: RDD[C], rdd4: RDD[D], preservesPartitioning: Boolean)(f: (Iterator[T], Iterator[B], Iterator[C], Iterator[D]) => Iterator[V]): RDD[V]
+
+### Example
+
+<pre>
+val a = sc.parallelize(0 to 9, 3)
+val b = sc.parallelize(10 to 19, 3)
+val c = sc.parallelize(100 to 109, 3)
+def myfunc(aiter: Iterator[Int], biter: Iterator[Int], citer: Iterator[Int]): Iterator[String] =
+{
+  var res = List[String]()
+  while (aiter.hasNext && biter.hasNext && citer.hasNext)
+  {
+    val x = aiter.next + " " + biter.next + " " + citer.next
+    res ::= x
+  }
+  res.iterator
+}
+a.zipPartitions(b, c)(myfunc).collect
+res50: Array[String] = Array(2 12 102, 1 11 101, 0 10 100, 5 15 105, 4 14 104, 3 13 103, 9 19 109, 8 18 108, 7 17 107, 6 16 106)
+</pre>
+
+---- 
+
+## zipWithIndex
+
+将输入数据标号，标号从0开始。如果RDD有多个数据分片，则会启动一个Spark任务来处理。
+
+### 定义
+
+def zipWithIndex(): RDD[(T, Long)]
+
+### Example
+
+<pre>
+val z = sc.parallelize(Array("A", "B", "C", "D"))
+val r = z.zipWithIndex
+res110: Array[(String, Long)] = Array((A,0), (B,1), (C,2), (D,3))
+
+val z = sc.parallelize(100 to 120, 5)
+val r = z.zipWithIndex
+r.collect
+res11: Array[(Int, Long)] = Array((100,0), (101,1), (102,2), (103,3), (104,4), (105,5), (106,6), (107,7), (108,8), (109,9), (110,10), (111,11), (112,12), (113,13), (114,14), (115,15), (116,16), (117,17), (118,18), (119,19), (120,20)) 
+</pre>
+
+----
+
+## zipWithUniqueId
+
+与zipWithIndex不同的是这个方法会给每个数据单元一个独立的id，但是和数据单元的实际顺序的index无关。即使RDD存在多个数据分片，这个方法也不会启动spark任务去处理。
+
+### 定义
+
+def zipWithUniqueId(): RDD[(T, Long)]
+
+### 
+
+<pre>
+val z = sc.parallelize(100 to 120, 5)
+val r = z.zipWithUniqueId
+r.collect
+
+res12: Array[(Int, Long)] = Array((100,0), (101,5), (102,10), (103,15), (104,1), (105,6), (106,11), (107,16), (108,2), (109,7), (110,12), (111,17), (112,3), (113,8), (114,13), (115,18), (116,4), (117,9), (118,14), (119,19), (120,24))
+</pre>
